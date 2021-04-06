@@ -1,0 +1,5 @@
+.bloop/
+.coursier/
+.metals/
+.vscode/
+out/
