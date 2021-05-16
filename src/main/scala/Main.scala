@@ -1,5 +1,5 @@
 import java.nio.file.Paths
-import org.objectweb.asm.{ClassReader, Type, ClassVisitor}
+import org.objectweb.asm.{ClassReader, ClassVisitor, Type}
 import org.objectweb.asm.commons.{ClassRemapper, SimpleRemapper}
 import org.objectweb.asm.tree.{ClassNode, FieldNode, MethodNode}
 import cats.effect.{ExitCode, IO, IOApp}
@@ -7,12 +7,13 @@ import cats.syntax.all.*
 import scala.jdk.CollectionConverters.*
 
 object Main extends IOApp {
-  override def run(args: List[String]): IO[ExitCode] = {
+  override def run(args: List[String]): IO[ExitCode] =
     if (args.length == 3) {
       val unobfuscatedPath = Paths.get(args(0))
       val obfuscatedPath = Paths.get(args(1))
       val outputPath = Paths.get(args(2))
       println("Searching for mappings...")
+
       for
         obfuscated <- Jar(obfuscatedPath).use(JarSignature.fromJar)
         unobfuscated <- Jar(unobfuscatedPath).use(JarSignature.fromJar)
@@ -26,7 +27,6 @@ object Main extends IOApp {
       println("Usage: java -jar deobfuscator.jar [unobfuscated-jar] [obfuscated-jar] [output-jar]")
       IO.pure(ExitCode.Success)
     }
-  }
 }
 
 final case class JarSignature(signatures: Map[String, List[ClassSignature]])
@@ -64,7 +64,7 @@ object JarSignature {
               case _ => acc
             }
           case None => acc
-        }
+      }
 }
 
 final case class ClassSignature(
@@ -122,17 +122,23 @@ final case class ClassMatch(obfuscated: ClassSignature, unobfuscated: ClassSigna
 class Deobfuscator(mappings: Map[String, ClassMatch]) extends ClassTransformer {
   val remapper = new SimpleRemapper(mappings.view.mapValues(_.unobfuscated.name).toMap.asJava) {
     override def mapFieldName(owner: String, name: String, descriptor: String): String =
-      mappings.get(owner)
+      mappings
+        .get(owner)
         .flatMap { classes =>
-          val index = classes.obfuscated.fields.indexWhere(f => f.node.name == name && f.node.desc == descriptor)
+          val index = classes.obfuscated.fields.indexWhere(f =>
+            f.node.name == name && f.node.desc == descriptor
+          )
           if (index >= 0) Some(classes.unobfuscated.fields(index).node.name) else None
         }
         .getOrElse(name)
 
     override def mapMethodName(owner: String, name: String, descriptor: String): String =
-      mappings.get(owner)
+      mappings
+        .get(owner)
         .flatMap { classes =>
-          val index = classes.obfuscated.methods.indexWhere(m => m.node.name == name && m.node.desc == descriptor)
+          val index = classes.obfuscated.methods.indexWhere(m =>
+            m.node.name == name && m.node.desc == descriptor
+          )
           if (index >= 0) Some(classes.unobfuscated.methods(index).node.name) else None
         }
         .getOrElse(name)

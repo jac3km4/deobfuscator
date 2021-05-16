@@ -2,4 +2,8 @@
 .coursier/
 .metals/
 .vscode/
+.bsp/
 out/
+target/
+resources/
+metals.sbt
