@@ -3,3 +3,5 @@
 .metals/
 .vscode/
 out/
+.bsp/
+target/

@@ -5,29 +5,44 @@ import org.objectweb.asm.tree.{ClassNode, FieldNode, MethodNode}
 import cats.effect.{ExitCode, IO, IOApp}
 import cats.syntax.all.*
 import scala.jdk.CollectionConverters.*
+import io.bullet.borer.{Cbor, Encoder}
 
 object Main extends IOApp {
-  override def run(args: List[String]): IO[ExitCode] = {
-    if (args.length == 3) {
-      val unobfuscatedPath = Paths.get(args(0))
-      val obfuscatedPath = Paths.get(args(1))
-      val outputPath = Paths.get(args(2))
-      println("Searching for mappings...")
-      for
-        obfuscated <- Jar(obfuscatedPath).use(JarSignature.fromJar)
-        unobfuscated <- Jar(unobfuscatedPath).use(JarSignature.fromJar)
-        matches = JarSignature.findMatches(obfuscated, unobfuscated)
-        _ = println("Writing the deobfuscated file...")
-        _ <- Jar(obfuscatedPath).use {
-          _.transform(outputPath)(Deobfuscator(matches)).compile.drain
-        }
-      yield ExitCode.Success
-    } else {
-      println("Usage: java -jar deobfuscator.jar [unobfuscated-jar] [obfuscated-jar] [output-jar]")
-      IO.pure(ExitCode.Success)
+  override def run(args: List[String]): IO[ExitCode] =
+    args match {
+      case List("deobfuscate", unobfuscatedJar, obfuscatedJar, outputJar) =>
+        val unobfuscatedPath = Paths.get(unobfuscatedJar)
+        val obfuscatedPath = Paths.get(obfuscatedJar)
+        val outputPath = Paths.get(outputJar)
+        for
+          obfuscated <- Jar(obfuscatedPath).use(JarSignature.fromJar)
+          unobfuscated <- Jar(unobfuscatedPath).use(JarSignature.fromJar)
+          matches = JarSignature.findMatches(obfuscated, unobfuscated)
+          _ = println("Writing the deobfuscated file...")
+          _ <- Jar(obfuscatedPath).use {
+            _.transform(outputPath)(Deobfuscator(matches)).compile.drain
+          }
+        yield ExitCode.Success
+
+      case List("save", unobfuscatedJar, obfuscatedJar, output) =>
+        val unobfuscatedPath = Paths.get(unobfuscatedJar)
+        val obfuscatedPath = Paths.get(obfuscatedJar)
+        val outputPath = Paths.get(output)
+        for
+          obfuscated <- Jar(obfuscatedPath).use(JarSignature.fromJar)
+          unobfuscated <- Jar(unobfuscatedPath).use(JarSignature.fromJar)
+          matches = JarSignature.findMatches(obfuscated, unobfuscated)
+          file = Cbor.encode(matches).to(outputPath.toFile).result
+          _ = println(s"Output saved to ${file.getPath}")
+        yield ExitCode.Success
+
+      case _ =>
+        println(
+          "Usage: java -jar deobfuscator.jar [deobfuscate|save] [unobfuscated-jar] [obfuscated-jar] [output-path]"
+        )
+        IO.pure(ExitCode.Success)
     }
   }
-}
 
 final case class JarSignature(signatures: Map[String, List[ClassSignature]])
 
@@ -78,31 +93,85 @@ final case class ClassSignature(
   def getBodySignature: String =
     this.methods
       .map { m =>
-        s"${m.node.maxLocals}:${m.node.maxStack}:${m.node.instructions.size}"
+        s"${m.maxLocals}:${m.maxStack}:${m.instructionCount}"
       }
       .mkString(":")
 }
 
 object ClassSignature {
+  implicit val encoder: Encoder[ClassSignature] = Encoder { (writer, sig) =>
+    writer
+      .writeArrayOpen(3)
+      .writeString(sig.name)
+      .write(sig.fields)
+      .write(sig.methods)
+      .writeArrayClose()
+  }
+
   def fromNode(node: ClassNode): ClassSignature = {
-    val fields = node.fields.asScala.map(FieldSignature.apply).toList
-    val methods = node.methods.asScala.map(MethodSignature.apply).toList
+    val fields = node.fields.asScala.map(FieldSignature.fromNode).toList
+    val methods = node.methods.asScala.map(MethodSignature.fromNode).toList
     ClassSignature(node.name, fields, methods)
   }
 }
 
-final case class FieldSignature(node: FieldNode) {
+final case class FieldSignature(name: String, descriptor: String, access: Int) {
   override def toString =
-    s"f${node.access}${Signature.formatType(Type.getType(node.desc))}"
+    s"f$access${Signature.formatType(Type.getType(descriptor))}"
 }
 
-final case class MethodSignature(node: MethodNode) {
+object FieldSignature {
+  implicit val encoder: Encoder[FieldSignature] = Encoder { (writer, sig) =>
+    writer
+      .writeArrayOpen(3)
+      .writeString(sig.name)
+      .writeString(sig.descriptor)
+      .writeInt(sig.access)
+      .writeArrayClose()
+  }
+
+  def fromNode(node: FieldNode): FieldSignature =
+    FieldSignature(node.name, node.desc, node.access)
+}
+
+final case class MethodSignature(
+    name: String,
+    descriptor: String,
+    access: Int,
+    maxLocals: Int,
+    maxStack: Int,
+    instructionCount: Int
+) {
   override def toString = {
-    val typ = Type.getMethodType(node.desc)
+    val typ = Type.getMethodType(descriptor)
     val args = typ.getArgumentTypes
     val ret = typ.getReturnType
-    s"m${node.access}(${args.map(Signature.formatType).mkString})${Signature.formatType(ret)}"
+    s"m$access(${args.map(Signature.formatType).mkString})${Signature.formatType(ret)}"
   }
+}
+
+object MethodSignature {
+  implicit val encoder: Encoder[MethodSignature] = Encoder { (writer, sig) =>
+    writer
+      .writeArrayOpen(6)
+      .writeString(sig.name)
+      .writeString(sig.descriptor)
+      .writeInt(sig.access)
+      .writeInt(sig.maxLocals)
+      .writeInt(sig.maxStack)
+      .writeInt(sig.instructionCount)
+      .writeArrayClose()
+  }
+
+  def fromNode(node: MethodNode): MethodSignature =
+    MethodSignature(
+      node.name,
+      node.desc,
+      node.access,
+      node.maxLocals,
+      node.maxStack,
+      node.instructions.size
+    )
 }
 
 object Signature {
@@ -119,21 +188,33 @@ object Signature {
 
 final case class ClassMatch(obfuscated: ClassSignature, unobfuscated: ClassSignature)
 
+object ClassMatch {
+  implicit val encoder: Encoder[ClassMatch] = Encoder { (writer, clazz) =>
+    writer
+      .writeArrayOpen(2)
+      .write(clazz.obfuscated)
+      .write(clazz.unobfuscated)
+      .writeArrayClose()
+  }
+}
+
 class Deobfuscator(mappings: Map[String, ClassMatch]) extends ClassTransformer {
   val remapper = new SimpleRemapper(mappings.view.mapValues(_.unobfuscated.name).toMap.asJava) {
     override def mapFieldName(owner: String, name: String, descriptor: String): String =
       mappings.get(owner)
         .flatMap { classes =>
-          val index = classes.obfuscated.fields.indexWhere(f => f.node.name == name && f.node.desc == descriptor)
-          if (index >= 0) Some(classes.unobfuscated.fields(index).node.name) else None
+          val index =
+            classes.obfuscated.fields.indexWhere(f => f.name == name && f.descriptor == descriptor)
+          if (index >= 0) Some(classes.unobfuscated.fields(index).name) else None
         }
         .getOrElse(name)
 
     override def mapMethodName(owner: String, name: String, descriptor: String): String =
       mappings.get(owner)
         .flatMap { classes =>
-          val index = classes.obfuscated.methods.indexWhere(m => m.node.name == name && m.node.desc == descriptor)
-          if (index >= 0) Some(classes.unobfuscated.methods(index).node.name) else None
+          val index =
+            classes.obfuscated.methods.indexWhere(m => m.name == name && m.descriptor == descriptor)
+          if (index >= 0) Some(classes.unobfuscated.methods(index).name) else None
         }
         .getOrElse(name)
   }
